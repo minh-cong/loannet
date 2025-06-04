@@ -78,6 +78,7 @@ class RiskAssessmentDashboard:
             st.sidebar.error(f"❌ Error loading model: {e}")
             self.model_loaded = False
 
+    # --- START OF SECTION TO BE REPLACED ---
     def _preprocess_input_data(self, data_dict):
         """
         Basic preprocessing for individual assessment.
@@ -96,60 +97,169 @@ class RiskAssessmentDashboard:
         if 'AMT_CREDIT' in df_input.columns and 'AMT_INCOME_TOTAL' in df_input.columns:
             df_input['CREDIT_INCOME_RATIO'] = df_input['AMT_CREDIT'] / (df_input['AMT_INCOME_TOTAL'] + 1e-6) # Avoid division by zero
         if 'DAYS_BIRTH' in df_input.columns: # Assuming age is DAYS_BIRTH in your features
-             df_input['AGE_YEARS'] = -df_input['DAYS_BIRTH'] / 365
-        # ... Add other critical derived features that are in self.selected_features
+            df_input['AGE_YEARS'] = -df_input['DAYS_BIRTH'] / 365
+        
+        # Add missing derived features
+        if 'AMT_CREDIT' in df_input.columns and 'AMT_ANNUITY' in df_input.columns:
+            df_input['CREDIT_ANNUITY_RATIO'] = df_input['AMT_CREDIT'] / (df_input['AMT_ANNUITY'] + 1e-6)
+        
+        if 'AMT_GOODS_PRICE' in df_input.columns and 'AMT_CREDIT' in df_input.columns:
+            df_input['GOODS_PRICE_CREDIT_RATIO'] = df_input['AMT_GOODS_PRICE'] / (df_input['AMT_CREDIT'] + 1e-6)
+        
+        if 'DAYS_EMPLOYED' in df_input.columns:
+            # Calculate employment years, handle unemployed case (365243 is the flag for unemployed)
+            df_input['EMPLOYED_YEARS'] = np.where(
+                df_input['DAYS_EMPLOYED'] == 365243, 
+                0,  # Unemployed
+                -df_input['DAYS_EMPLOYED'] / 365
+            )
+        
+        # Age group categorization
+        if 'AGE_YEARS' in df_input.columns:
+            # Ensure AGE_YEARS is calculated first if not already present
+            if 'AGE_YEARS' not in df_input.columns and 'DAYS_BIRTH' in df_input.columns:
+                df_input['AGE_YEARS'] = -df_input['DAYS_BIRTH'] / 365
+            
+            if 'AGE_YEARS' in df_input.columns: # Check again after potential creation
+                df_input['AGE_GROUP'] = pd.cut(
+                    df_input['AGE_YEARS'], 
+                    bins=[0, 25, 35, 50, 100], 
+                    labels=[0, 1, 2, 3], # Creates integer labels
+                    right=False 
+                ).astype(int) 
+        
+        # External source features
+        ext_cols = ['EXT_SOURCE_1', 'EXT_SOURCE_2', 'EXT_SOURCE_3']
+        if all(col in df_input.columns for col in ext_cols):
+            df_input['EXT_SOURCE_MEAN'] = df_input[ext_cols].mean(axis=1)
+            df_input['EXT_SOURCE_STD'] = df_input[ext_cols].std(axis=1)
+            df_input['EXT_SOURCE_PROD'] = df_input[ext_cols].prod(axis=1)
 
         # 2. Label Encoding (use loaded encoders)
         for col, le in self.label_encoders.items():
             if col in df_input.columns:
-                # Handle unseen labels: map to a specific category (e.g., -1 or len(classes))
-                # For simplicity, this example might error or mis-encode if new value
+                if col == 'AGE_GROUP' and pd.api.types.is_integer_dtype(df_input[col]):
+                    continue
                 try:
                     df_input[col] = le.transform(df_input[col].astype(str))
-                except ValueError:
-                    # Simplistic handling: assign a common value or a special "unknown" code
-                    # This should ideally be a robust strategy defined during model training
-                    st.warning(f"Unseen value in '{col}'. Assigning default. Prediction may be less accurate.")
-                    df_input[col] = -1 # Or some other placeholder your model might expect for unknowns
+                except ValueError as e:
+                    st.warning(f"Unseen value in '{col}'. Assigning -1 (unknown). Prediction may be less accurate. Original error: {e}")
+                    df_input[col] = -1 
 
         # 3. Ensure all selected_features are present, fill NaNs if necessary
-        # This part is crucial: the final DataFrame must have exactly the selected_features
-        # with appropriate values (e.g., median imputation for missing ones if that's what training did)
         processed_data = pd.DataFrame(columns=self.selected_features)
         for feature in self.selected_features:
             if feature in df_input.columns:
                 processed_data[feature] = df_input[feature]
             else:
-                # Fill with a default value (e.g., 0, mean, median) if a selected feature
-                # cannot be derived from form inputs. This is a HUGE assumption.
-                # A better approach is to ensure form inputs can generate all selected features.
-                processed_data[feature] = 0 # Placeholder - VERY LIKELY TO BE WRONG
-                st.warning(f"Feature '{feature}' not derivable from form, defaulted to 0. Prediction accuracy will be affected.")
+                processed_data[feature] = np.nan 
+                st.warning(f"Feature '{feature}' not derivable from form or created features. Will be imputed. Prediction accuracy affected.")
 
-        # Fill any NaNs that might have resulted (e.g., from ratios with zero income)
-        # Use medians from training if available, or a simple fillna(0) for this demo
-        processed_data = processed_data.fillna(0)
-
-
-        # 4. Scaling (use loaded scaler) - only on numeric columns among selected_features
-        numeric_cols_to_scale = [col for col in self.selected_features if processed_data[col].dtype in [np.number] and col not in self.label_encoders.keys()] # Rough check
-        if self.scaler and numeric_cols_to_scale:
-            try:
-                # Ensure columns are in the same order as during fit
-                # This is tricky. Scaler expects all columns it was fit on.
-                # For this demo, we assume the scaler was fit on self.selected_features or a subset
-                # A more robust way is to save the list of scaled columns with the scaler.
-                
-                # Create a DataFrame with all selected features, then scale.
-                # The scaler was likely fit on X_train which had selected_features.
-                scaled_values = self.scaler.transform(processed_data[self.selected_features])
-                processed_df_scaled = pd.DataFrame(scaled_values, columns=self.selected_features, index=processed_data.index)
-                return processed_df_scaled[self.selected_features] # Ensure column order
-            except Exception as e:
-                st.error(f"Error during scaling: {e}. Using unscaled data for selected numeric features.")
-                return processed_data[self.selected_features] # Fallback, but likely wrong
+        for col in processed_data.columns:
+            if processed_data[col].isnull().any():
+                if pd.api.types.is_numeric_dtype(processed_data[col]):
+                    processed_data[col] = processed_data[col].fillna(0) 
+                else:
+                    processed_data[col] = processed_data[col].fillna(-1) 
         
-        return processed_data[self.selected_features] # Return only selected features in correct order
+        for col in self.selected_features: # Ensure this loop is correct
+            if col in processed_data.columns and pd.api.types.is_numeric_dtype(processed_data[col]):
+                processed_data[col] = processed_data[col].astype(float)
+
+        # 4. Scaling (use loaded scaler)
+        if self.scaler:
+            scaled_features_list = []
+            explicit_scaled_features_provided = False
+
+            if hasattr(self.scaler, 'feature_names_in_'):
+                scaled_features_list = self.scaler.feature_names_in_
+                explicit_scaled_features_provided = True
+            elif hasattr(self.model_instance, 'scaled_feature_names') and self.model_instance.scaled_feature_names is not None:
+                # This assumes you might save a list of scaled feature names with your model
+                scaled_features_list = self.model_instance.scaled_feature_names
+                explicit_scaled_features_provided = True
+                st.info("Using an explicitly saved list of scaled features.")
+
+            if not explicit_scaled_features_provided:
+                # Fallback: Identify numeric columns from selected_features present in processed_data
+                candidate_scaled_features = [
+                    col for col in self.selected_features 
+                    if col in processed_data.columns and pd.api.types.is_numeric_dtype(processed_data[col])
+                ]
+                
+                if hasattr(self.scaler, 'n_features_in_'):
+                    if len(candidate_scaled_features) == self.scaler.n_features_in_:
+                        scaled_features_list = candidate_scaled_features
+                        # Optional: st.info("Inferred scaled features list matches scaler's expected number of features.")
+                    else:
+                        st.error(
+                            f"Scaler expects {self.scaler.n_features_in_} features, but found "
+                            f"{len(candidate_scaled_features)} numeric features among selected_features. "
+                            "Scaling might be incorrect or fail. Check your feature list for scaling."
+                        )
+                        # Decide if you want to proceed with candidate_scaled_features or stop/not scale
+                        scaled_features_list = candidate_scaled_features # Proceed with caution
+                else:
+                    # No feature_names_in_ and no n_features_in_ (very old scaler or custom)
+                    st.warning(
+                        "Scaler metadata (feature_names_in_ or n_features_in_) not found. "
+                        "Assuming all derived numeric features from selected_features should be scaled. "
+                        "This is a strong assumption. Ensure this matches your training process."
+                    )
+                    scaled_features_list = candidate_scaled_features
+            
+            # Filter this list to ensure all columns are actually in processed_data and numeric
+            # (redundant if candidate_scaled_features was the source, but good for explicit lists)
+            actual_cols_to_scale = [
+                col for col in scaled_features_list 
+                if col in processed_data.columns and pd.api.types.is_numeric_dtype(processed_data[col])
+            ]
+
+            # Check if the number of columns derived matches the original scaled_features_list intent
+            # (especially if scaled_features_list came from feature_names_in_ or explicit list)
+            if explicit_scaled_features_provided and len(actual_cols_to_scale) != len(scaled_features_list):
+                missing_explicit_cols = set(scaled_features_list) - set(actual_cols_to_scale)
+                st.warning(f"Some explicitly defined scaled features are not available or not numeric in processed data: {missing_explicit_cols}. They will not be scaled.")
+
+            if actual_cols_to_scale:
+                try:
+                    data_for_scaling = processed_data[actual_cols_to_scale].copy()
+                    
+                    # Final check for NaNs before transform (should have been handled by imputation)
+                    for col_ds in data_for_scaling.columns:
+                        if data_for_scaling[col_ds].isnull().any():
+                            st.warning(f"NaNs found in column '{col_ds}' just before scaling. Filling with 0. Review imputation.")
+                            data_for_scaling[col_ds] = data_for_scaling[col_ds].fillna(0) 
+
+                    # Verify number of features if n_features_in_ is available
+                    if hasattr(self.scaler, 'n_features_in_') and data_for_scaling.shape[1] != self.scaler.n_features_in_:
+                        st.error(f"Critical: Number of columns for scaling ({data_for_scaling.shape[1]}, names: {data_for_scaling.columns.tolist()}) "
+                                f"does not match scaler's expected input features ({self.scaler.n_features_in_}). Scaling aborted for safety.")
+                    else:
+                        scaled_values = self.scaler.transform(data_for_scaling)
+                        processed_data[actual_cols_to_scale] = scaled_values
+                        
+                except ValueError as e:
+                    st.error(f"Error during scaling: {e}. Input features might not match scaler's expectations. "
+                            f"Attempted to scale: {actual_cols_to_scale}. Some features might remain unscaled.")
+                except Exception as e:
+                    st.error(f"Unexpected error during scaling: {e}. Some features might remain unscaled.")
+            elif scaled_features_list: # scaled_features_list was determined, but actual_cols_to_scale is empty
+                st.warning("List of features to scale was determined, but none are present/numeric in the current processed data. Scaling skipped.")
+            # else: No features determined for scaling, so do nothing.
+
+        # Ensure the final DataFrame has columns in the exact order of self.selected_features
+        try:
+            final_processed_df = processed_data[self.selected_features]
+        except KeyError as e:
+            missing_cols_final = set(self.selected_features) - set(processed_data.columns)
+            st.error(f"KeyError when selecting final features: {e}. Missing columns: {missing_cols_final}")
+            st.error(f"Processed columns available: {processed_data.columns.tolist()}")
+            st.error(f"Expected columns (self.selected_features): {self.selected_features}")
+            return None 
+
+        return final_processed_df
+    # --- END OF SECTION TO BE REPLACED ---
 
     def main_dashboard(self):
         """Main dashboard interface"""
@@ -209,47 +319,118 @@ class RiskAssessmentDashboard:
         st.header("📊 Individual Risk Assessment")
         if not self.model_loaded:
             st.warning("Model not loaded. Risk assessment functionality is limited/disabled.")
-            # return # Optionally return if model is critical
+            return
 
         col1, col2 = st.columns([1, 2])
 
         with col1:
             st.subheader("Customer Information")
-            # These inputs need to map to features your model expects,
-            # particularly those in `self.selected_features`.
-            # This form is a simplification.
             with st.form("customer_input_form"):
-                # Map to features model might use (examples)
+                # Basic Information
+                st.markdown("### Basic Information")
                 amt_income_total = st.number_input("Annual Income ($)", min_value=0, value=50000, key="income")
                 amt_credit = st.number_input("Credit Amount ($)", min_value=0, value=200000, key="credit")
-                # Model expects DAYS_BIRTH (negative days from today)
+                amt_goods_price = st.number_input("Goods Price ($)", min_value=0, value=180000, key="goods_price")
+                amt_annuity = st.number_input("Annuity Amount ($)", min_value=0, value=12000, key="annuity")
+                
                 age_years_form = st.number_input("Age (Years)", min_value=18, max_value=100, value=35, key="age")
-                days_birth = - (age_years_form * 365) # Convert to DAYS_BIRTH
-
-                # Example: 'CODE_GENDER' might be a selected feature
-                code_gender = st.selectbox("Gender", ["F", "M"], key="gender") # Assuming model uses 'F'/'M'
-
-                # Example: 'NAME_EDUCATION_TYPE'
-                education_options = list(self.label_encoders.get('NAME_EDUCATION_TYPE', pd.Series(dtype=object)).classes_) \
-                                    if 'NAME_EDUCATION_TYPE' in self.label_encoders and hasattr(self.label_encoders['NAME_EDUCATION_TYPE'], 'classes_') \
-                                    else ["Secondary / secondary special", "Higher education", "Incomplete higher", "Lower secondary"]
-                name_education_type = st.selectbox("Education", education_options, key="education")
-
-                # Example: 'DAYS_EMPLOYED' (negative days)
+                days_birth = -(age_years_form * 365)
+                
                 employed_years_form = st.number_input("Years Employed", min_value=0, max_value=50, value=5, key="emp_years")
-                days_employed = - (employed_years_form * 365) # Convert
-                if days_employed == 0: days_employed = 365243 # Special value for unemployed if model uses it
-
-                # Example: 'CNT_CHILDREN'
+                days_employed = -(employed_years_form * 365) if employed_years_form > 0 else 365243
+                
                 cnt_children = st.number_input("Number of Children", min_value=0, max_value=10, value=0, key="children")
 
-                # Add more inputs as needed to cover your `selected_features`
-                # For EXT_SOURCE_X features, it's hard to get from a simple form.
-                # They are often pre-calculated scores. For demo, we might have to default them.
-                ext_source_1 = st.slider("External Source 1 (Normalized Score)", 0.0, 1.0, 0.5, 0.01, key="ext1", help="If model uses this feature directly")
-                ext_source_2 = st.slider("External Source 2 (Normalized Score)", 0.0, 1.0, 0.5, 0.01, key="ext2")
-                ext_source_3 = st.slider("External Source 3 (Normalized Score)", 0.0, 1.0, 0.5, 0.01, key="ext3")
+                # Personal Details
+                st.markdown("### Personal Details")
+                code_gender = st.selectbox("Gender", ["F", "M"], key="gender")
+                
+                education_options = ["Secondary / secondary special", "Higher education", "Incomplete higher", "Lower secondary", "Academic degree"]
+                name_education_type = st.selectbox("Education", education_options, key="education")
+                
+                income_type_options = ["Working", "Commercial associate", "Pensioner", "State servant", "Unemployed", "Student", "Businessman", "Maternity leave"]
+                name_income_type = st.selectbox("Income Type", income_type_options, key="income_type")
+                
+                contract_type_options = ["Cash loans", "Revolving loans"]
+                name_contract_type = st.selectbox("Contract Type", contract_type_options, key="contract_type")
 
+                # Housing Information
+                st.markdown("### Housing Information")
+                housing_type_options = ["House / apartment", "With parents", "Municipal apartment", "Rented apartment", "Office apartment", "Co-op apartment"]
+                name_housing_type = st.selectbox("Housing Type", housing_type_options, key="housing_type")
+                
+                # Organization
+                org_type_options = ["Business Entity Type 3", "School", "Government", "Religion", "Other", "XNA", "Electricity", "Medicine", "Business Entity Type 2", "Self-employed", "Transport: type 2", "Construction", "Housing", "Kindergarten", "Trade: type 7", "Industry: type 11", "Military", "Services", "Security Ministries", "Transport: type 4", "Industry: type 1", "Emergency", "Security", "Trade: type 2", "University", "Transport: type 3", "Police", "Business Entity Type 1", "Postal", "Industry: type 4", "Agriculture", "Restaurant", "Culture", "Hotel", "Industry: type 7", "Trade: type 3", "Industry: type 3", "Bank", "Industry: type 9", "Insurance", "Trade: type 6", "Industry: type 2", "Transport: type 1", "Industry: type 12", "Mobile", "Trade: type 1", "Industry: type 5", "Industry: type 10", "Legal Services", "Advertising", "Trade: type 5", "Cleaning", "Industry: type 13", "Trade: type 4", "Telecom", "Industry: type 8", "Realtor", "Industry: type 6"]
+                organization_type = st.selectbox("Organization Type", org_type_options, key="org_type")
+
+                # Regional Information
+                st.markdown("### Regional Information")
+                region_population_relative = st.slider("Region Population Relative", 0.0, 0.1, 0.02, 0.001, key="region_pop")
+                region_rating_client = st.selectbox("Region Rating Client", [1, 2, 3], key="region_rating")
+                region_rating_client_w_city = st.selectbox("Region Rating Client with City", [1, 2, 3], key="region_rating_city")
+                
+                # Registration and ID
+                days_registration = st.number_input("Days since Registration", min_value=0, max_value=25000, value=5000, key="days_reg")
+                days_registration = -days_registration
+                days_id_publish = st.number_input("Days since ID Published", min_value=0, max_value=10000, value=3000, key="days_id")
+                days_id_publish = -days_id_publish
+                days_last_phone_change = st.number_input("Days since Last Phone Change", min_value=0, max_value=5000, value=365, key="phone_change")
+                days_last_phone_change = -days_last_phone_change
+
+                # Contact Information
+                st.markdown("### Contact Information")
+                flag_emp_phone = st.selectbox("Has Employment Phone", [0, 1], key="emp_phone")
+                flag_work_phone = st.selectbox("Has Work Phone", [0, 1], key="work_phone")
+                
+                # Location Flags
+                reg_city_not_live_city = st.selectbox("Registration City ≠ Live City", [0, 1], key="reg_live")
+                reg_city_not_work_city = st.selectbox("Registration City ≠ Work City", [0, 1], key="reg_work")
+                live_city_not_work_city = st.selectbox("Live City ≠ Work City", [0, 1], key="live_work")
+
+                # Building Information (if available)
+                st.markdown("### Building Information")
+                elevators_avg = st.number_input("Elevators Average", min_value=0.0, max_value=1.0, value=0.1, key="elevators_avg")
+                floorsmax_avg = st.number_input("Floors Max Average", min_value=0.0, max_value=1.0, value=0.2, key="floors_avg")
+                livingarea_avg = st.number_input("Living Area Average", min_value=0.0, max_value=1.0, value=0.3, key="living_avg")
+                
+                elevators_mode = st.number_input("Elevators Mode", min_value=0.0, max_value=1.0, value=0.1, key="elevators_mode")
+                floorsmax_mode = st.number_input("Floors Max Mode", min_value=0.0, max_value=1.0, value=0.2, key="floors_mode")
+                livingarea_mode = st.number_input("Living Area Mode", min_value=0.0, max_value=1.0, value=0.3, key="living_mode")
+                
+                elevators_medi = st.number_input("Elevators Median", min_value=0.0, max_value=1.0, value=0.1, key="elevators_medi")
+                floorsmax_medi = st.number_input("Floors Max Median", min_value=0.0, max_value=1.0, value=0.2, key="floors_medi")
+                livingarea_medi = st.number_input("Living Area Median", min_value=0.0, max_value=1.0, value=0.3, key="living_medi")
+
+                # Building details
+                fondkapremont_mode_options = ["not specified", "reg oper account", "org spec account", "reg oper spec account"]
+                fondkapremont_mode = st.selectbox("Fund Repair Mode", fondkapremont_mode_options, key="fond_mode")
+                
+                housetype_mode_options = ["block of flats", "terraced house", "specific housing"]
+                housetype_mode = st.selectbox("House Type Mode", housetype_mode_options, key="house_mode")
+                
+                totalarea_mode = st.number_input("Total Area Mode", min_value=0.0, max_value=1.0, value=0.1, key="total_area")
+                
+                wallsmaterial_mode_options = ["Panel", "Block", "Mixed", "Brick", "Monolithic", "Others", "Stone, brick", "Wooden"]
+                wallsmaterial_mode = st.selectbox("Walls Material Mode", wallsmaterial_mode_options, key="walls_mode")
+                
+                emergencystate_mode_options = ["No", "Yes"]
+                emergencystate_mode = st.selectbox("Emergency State Mode", emergencystate_mode_options, key="emergency_mode")
+
+                # Social Circle
+                st.markdown("### Social Circle")
+                def_30_cnt_social_circle = st.number_input("30 Days Default Count Social Circle", min_value=0, max_value=50, value=0, key="def_30")
+                def_60_cnt_social_circle = st.number_input("60 Days Default Count Social Circle", min_value=0, max_value=50, value=0, key="def_60")
+
+                # Documents
+                st.markdown("### Documents")
+                flag_document_3 = st.selectbox("Has Document 3", [0, 1], key="doc_3")
+                flag_document_6 = st.selectbox("Has Document 6", [0, 1], key="doc_6")
+
+                # External Sources
+                st.markdown("### External Sources")
+                ext_source_1 = st.slider("External Source 1", 0.0, 1.0, 0.5, 0.01, key="ext1")
+                ext_source_2 = st.slider("External Source 2", 0.0, 1.0, 0.5, 0.01, key="ext2")
+                ext_source_3 = st.slider("External Source 3", 0.0, 1.0, 0.5, 0.01, key="ext3")
 
                 submitted = st.form_submit_button("🔍 Assess Risk")
 
@@ -259,18 +440,68 @@ class RiskAssessmentDashboard:
                     return
 
                 input_data = {
+                    # Basic fields
                     'AMT_INCOME_TOTAL': amt_income_total,
                     'AMT_CREDIT': amt_credit,
+                    'AMT_GOODS_PRICE': amt_goods_price,
+                    'AMT_ANNUITY': amt_annuity,
                     'DAYS_BIRTH': days_birth,
-                    'CODE_GENDER': code_gender,
-                    'NAME_EDUCATION_TYPE': name_education_type,
                     'DAYS_EMPLOYED': days_employed,
                     'CNT_CHILDREN': cnt_children,
-                    'EXT_SOURCE_1': ext_source_1, # Assuming these are directly usable
+                    
+                    # Personal
+                    'CODE_GENDER': code_gender,
+                    'NAME_EDUCATION_TYPE': name_education_type,
+                    'NAME_INCOME_TYPE': name_income_type,
+                    'NAME_CONTRACT_TYPE': name_contract_type,
+                    'NAME_HOUSING_TYPE': name_housing_type,
+                    'ORGANIZATION_TYPE': organization_type,
+                    
+                    # Regional
+                    'REGION_POPULATION_RELATIVE': region_population_relative,
+                    'REGION_RATING_CLIENT': region_rating_client,
+                    'REGION_RATING_CLIENT_W_CITY': region_rating_client_w_city,
+                    
+                    # Dates
+                    'DAYS_REGISTRATION': days_registration,
+                    'DAYS_ID_PUBLISH': days_id_publish,
+                    'DAYS_LAST_PHONE_CHANGE': days_last_phone_change,
+                    
+                    # Flags
+                    'FLAG_EMP_PHONE': flag_emp_phone,
+                    'FLAG_WORK_PHONE': flag_work_phone,
+                    'REG_CITY_NOT_LIVE_CITY': reg_city_not_live_city,
+                    'REG_CITY_NOT_WORK_CITY': reg_city_not_work_city,
+                    'LIVE_CITY_NOT_WORK_CITY': live_city_not_work_city,
+                    
+                    # Building info
+                    'ELEVATORS_AVG': elevators_avg,
+                    'FLOORSMAX_AVG': floorsmax_avg,
+                    'LIVINGAREA_AVG': livingarea_avg,
+                    'ELEVATORS_MODE': elevators_mode,
+                    'FLOORSMAX_MODE': floorsmax_mode,
+                    'LIVINGAREA_MODE': livingarea_mode,
+                    'ELEVATORS_MEDI': elevators_medi,
+                    'FLOORSMAX_MEDI': floorsmax_medi,
+                    'LIVINGAREA_MEDI': livingarea_medi,
+                    'FONDKAPREMONT_MODE': fondkapremont_mode,
+                    'HOUSETYPE_MODE': housetype_mode,
+                    'TOTALAREA_MODE': totalarea_mode,
+                    'WALLSMATERIAL_MODE': wallsmaterial_mode,
+                    'EMERGENCYSTATE_MODE': emergencystate_mode,
+                    
+                    # Social
+                    'DEF_30_CNT_SOCIAL_CIRCLE': def_30_cnt_social_circle,
+                    'DEF_60_CNT_SOCIAL_CIRCLE': def_60_cnt_social_circle,
+                    
+                    # Documents
+                    'FLAG_DOCUMENT_3': flag_document_3,
+                    'FLAG_DOCUMENT_6': flag_document_6,
+                    
+                    # External sources
+                    'EXT_SOURCE_1': ext_source_1,
                     'EXT_SOURCE_2': ext_source_2,
                     'EXT_SOURCE_3': ext_source_3,
-                    # Add ALL other features your model's feature_engineering creates
-                    # and are part of 'selected_features', or ensure _preprocess_input_data can derive them.
                 }
                 
                 processed_df = self._preprocess_input_data(input_data)
@@ -289,7 +520,7 @@ class RiskAssessmentDashboard:
                         }
                         # For simplicity, risk factors are not dynamically generated from SHAP here
                         # but could be in a more advanced version.
-                        st.session_state.risk_assessment['factors'] = self.get_demo_risk_factors(input_data)
+                        st.session_state.risk_assessment['factors'] = self.get_demo_risk_factors(input_data, processed_df.iloc[0]) # Pass processed data too
 
                     except Exception as e:
                         st.error(f"Error during prediction: {e}")
@@ -305,18 +536,55 @@ class RiskAssessmentDashboard:
             st.subheader("Risk Assessment Results")
             self.display_risk_results()
 
-    def get_demo_risk_factors(self, raw_input_data):
-        """Generates simplified demo risk factors based on raw input."""
+    def get_demo_risk_factors(self, raw_input_data, processed_data_row=None):
+        """Generates simplified demo risk factors based on raw and processed input."""
         factors = []
-        credit_income_ratio = (raw_input_data['AMT_CREDIT'] / (raw_input_data['AMT_INCOME_TOTAL'] + 1e-6))
-        age_years = -raw_input_data['DAYS_BIRTH'] / 365
-        employment_years = -raw_input_data['DAYS_EMPLOYED'] / 365 if raw_input_data['DAYS_EMPLOYED'] < 0 else 0
+        
+        # Use processed_data_row if available for derived features, otherwise calculate from raw
+        if processed_data_row is not None and 'CREDIT_INCOME_RATIO' in self.selected_features:
+             # Assuming self.selected_features is a list and processed_data_row is a pandas Series or similar
+            if isinstance(processed_data_row, pd.Series):
+                credit_income_ratio = processed_data_row.get('CREDIT_INCOME_RATIO', float('nan'))
+            else: # if numpy array
+                try:
+                    idx = self.selected_features.index('CREDIT_INCOME_RATIO')
+                    credit_income_ratio = processed_data_row[idx]
+                except (ValueError, IndexError):
+                    credit_income_ratio = (raw_input_data['AMT_CREDIT'] / (raw_input_data['AMT_INCOME_TOTAL'] + 1e-6))
 
-        if credit_income_ratio > 5:
+        else: # Fallback to raw calculation
+            credit_income_ratio = (raw_input_data['AMT_CREDIT'] / (raw_input_data['AMT_INCOME_TOTAL'] + 1e-6))
+
+        if processed_data_row is not None and 'AGE_YEARS' in self.selected_features:
+            if isinstance(processed_data_row, pd.Series):
+                age_years = processed_data_row.get('AGE_YEARS', float('nan'))
+            else: # if numpy array
+                try:
+                    idx = self.selected_features.index('AGE_YEARS')
+                    age_years = processed_data_row[idx]
+                except (ValueError, IndexError):
+                    age_years = -raw_input_data['DAYS_BIRTH'] / 365
+        else:
+            age_years = -raw_input_data['DAYS_BIRTH'] / 365
+        
+        if processed_data_row is not None and 'EMPLOYED_YEARS' in self.selected_features:
+            if isinstance(processed_data_row, pd.Series):
+                employment_years = processed_data_row.get('EMPLOYED_YEARS', float('nan'))
+            else: # if numpy array
+                try:
+                    idx = self.selected_features.index('EMPLOYED_YEARS')
+                    employment_years = processed_data_row[idx]
+                except (ValueError, IndexError):
+                     employment_years = -raw_input_data['DAYS_EMPLOYED'] / 365 if raw_input_data['DAYS_EMPLOYED'] < 0 else 0
+        else:
+            employment_years = -raw_input_data['DAYS_EMPLOYED'] / 365 if raw_input_data['DAYS_EMPLOYED'] < 0 else 0
+
+
+        if not np.isnan(credit_income_ratio) and credit_income_ratio > 5:
             factors.append(("High Credit-to-Income Ratio", f"{credit_income_ratio:.1f}x", "High Risk"))
-        if age_years < 25:
+        if not np.isnan(age_years) and age_years < 25:
             factors.append(("Young Age", f"{int(age_years)} years", "Medium Risk"))
-        if employment_years < 2:
+        if not np.isnan(employment_years) and employment_years < 2:
             factors.append(("Short Employment History", f"{employment_years:.1f} years", "Medium Risk"))
         if raw_input_data.get('CNT_CHILDREN', 0) > 2:
             factors.append(("Many Dependents", f"{raw_input_data['CNT_CHILDREN']} children", "Low Risk"))
@@ -399,54 +667,58 @@ class RiskAssessmentDashboard:
         with col2:
             st.subheader("💡 Local Explanation (SHAP for last assessed customer)")
             if 'risk_assessment' in st.session_state and 'processed_input_for_shap' in st.session_state.risk_assessment:
-                if self.explainer:
+                if self.explainer or hasattr(self.model_instance, 'explain_prediction'): # Check for either explainer or method
                     try:
-                        customer_data_np = st.session_state.risk_assessment['processed_input_for_shap']
+                        # Get the processed input used for prediction
+                        customer_data_for_shap_values = st.session_state.risk_assessment['processed_input_for_shap']
                         
-                        # We need to ensure customer_data_np is a 2D array for some SHAP explainers
-                        if customer_data_np.ndim == 1:
-                            customer_data_np = customer_data_np.reshape(1, -1)
-                        
-                        # Create a DataFrame for SHAP, as TreeExplainer often works best with feature names
-                        customer_df_for_shap = pd.DataFrame(customer_data_np, columns=self.selected_features)
+                        # Ensure it's a 1D array for explain_prediction if it takes a single row
+                        if customer_data_for_shap_values.ndim > 1:
+                            customer_data_for_shap_values = customer_data_for_shap_values.flatten()
 
-                        # shap_values = self.explainer.shap_values(customer_data_np) # This might be for lgb model output (log-odds)
-                        explanation_object = self.model_instance.explain_prediction(customer_df_for_shap.iloc[0].values) # using the class method
+                        # Create a DataFrame for display/context if needed by explain_prediction or for SHAP plots directly
+                        # The column names must match self.selected_features
+                        customer_df_for_shap_display = pd.DataFrame([customer_data_for_shap_values], columns=self.selected_features)
+
+                        # Call the model's explain_prediction method
+                        explanation_object = self.model_instance.explain_prediction(customer_df_for_shap_display.iloc[0])
 
                         if explanation_object:
                             shap_values_for_class1 = explanation_object['shap_values']
                             expected_value_class1 = explanation_object['expected_value']
-                            
+                            feature_names_for_shap = explanation_object.get('feature_names', self.selected_features)
+                            # Customer data for shap might be different from processed_input_for_shap if explain_prediction re-fetches or transforms
+                            customer_data_from_expl = explanation_object.get('customer_data', customer_df_for_shap_display.iloc[0].values)
+
+
                             st.write(f"SHAP Base Value (Average Model Output): {expected_value_class1:.4f}")
 
+                            # Create SHAP Explanation object
+                            shap_explanation = shap.Explanation(
+                                values=shap_values_for_class1,
+                                base_values=expected_value_class1,
+                                data=customer_data_from_expl, # Use data that matches shap_values
+                                feature_names=feature_names_for_shap
+                            )
+
                             # Waterfall plot
-                            fig_waterfall, ax_waterfall = plt.subplots() # Create matplotlib figure
-                            shap.waterfall_plot(shap.Explanation(values=shap_values_for_class1,
-                                                                 base_values=expected_value_class1,
-                                                                 data=customer_df_for_shap.iloc[0].values,
-                                                                 feature_names=self.selected_features),
-                                                max_display=10, show=False)
+                            fig_waterfall, ax_waterfall = plt.subplots()
+                            shap.waterfall_plot(shap_explanation, max_display=10, show=False)
+                            ax_waterfall.tick_params(axis='y', labelsize=8) # Adjust label size if needed
+                            ax_waterfall.tick_params(axis='x', labelsize=8)
+                            plt.tight_layout()
                             st.pyplot(fig_waterfall)
-                            plt.close(fig_waterfall) # Close plot to free memory
+                            plt.close(fig_waterfall)
 
-                            # Force plot
-                            # shap.initjs() # Needed if not run in Jupyter
-                            # force_plot = shap.force_plot(expected_value_class1,
-                            #                              shap_values_for_class1,
-                            #                              customer_df_for_shap.iloc[0],
-                            #                              matplotlib=False) # Use matplotlib=True for static image
-                            # # For Streamlit, saving to HTML and displaying as component is more robust for interactive plots
-                            # shap_html = f"<head>{shap.getjs()}</head><body>{force_plot.html()}</body>"
-                            # st.components.v1.html(shap_html, height=200, scrolling=True)
                             st.info("Force plot display can be complex in Streamlit. Waterfall plot shown above.")
-
-
                         else:
-                            st.error("Could not generate SHAP explanation object.")
+                            st.error("Could not generate SHAP explanation object from model_instance.explain_prediction.")
                     except Exception as e:
                         st.error(f"Error generating SHAP plot: {e}")
+                        import traceback
+                        st.error(traceback.format_exc())
                 else:
-                    st.info("SHAP explainer not available (was not loaded with the model).")
+                    st.info("SHAP explainer or explain_prediction method not available (was not loaded/defined with the model).")
             else:
                 st.info("Assess a customer first to see their specific SHAP explanation.")
 
@@ -482,16 +754,20 @@ class RiskAssessmentDashboard:
         # For now, using placeholders or values from your last run
         st.subheader("Overall Performance (on Validation Set during training)")
 
-        # Example: Extracting AUC from the model if it was stored (e.g. as an attribute)
-        # This is a placeholder, adapt to how your model stores this.
-        auc_lgb = self.model_instance.models.get('lgb_auc', 0.76) # Example
-        auc_xgb = self.model_instance.models.get('xgb_auc', 0.75)
-        auc_ensemble = self.model_instance.models.get('ensemble_auc', 0.7683) # From your last run log
+        auc_lgb = "N/A"
+        auc_xgb = "N/A"
+        auc_ensemble = "N/A"
+
+        if hasattr(self.model_instance, 'models') and isinstance(self.model_instance.models, dict):
+            auc_lgb = self.model_instance.models.get('lgb_auc', "N/A") 
+            auc_xgb = self.model_instance.models.get('xgb_auc', "N/A")
+            auc_ensemble = self.model_instance.models.get('ensemble_auc', "N/A")
 
         col1, col2, col3 = st.columns(3)
-        col1.metric("LGBM AUC", f"{auc_lgb:.4f}")
-        col2.metric("XGBoost AUC", f"{auc_xgb:.4f}")
-        col3.metric("Ensemble AUC", f"{auc_ensemble:.4f}")
+        col1.metric("LGBM AUC", f"{auc_lgb:.4f}" if isinstance(auc_lgb, float) else auc_lgb)
+        col2.metric("XGBoost AUC", f"{auc_xgb:.4f}" if isinstance(auc_xgb, float) else auc_xgb)
+        col3.metric("Ensemble AUC", f"{auc_ensemble:.4f}" if isinstance(auc_ensemble, float) else auc_ensemble)
+
 
         st.markdown("---")
         st.subheader("Classification Report (Example)")
