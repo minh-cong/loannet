@@ -49,24 +49,39 @@ class RiskAssessmentDashboard:
     def load_model_components(self):
         """Load trained model and its components if available"""
         try:
-            self.model_instance.load_model('home_credit_demo_model.pkl') # Path to your saved model
+            # Tạo một instance mới mỗi lần load để đảm bảo trạng thái sạch
+            self.model_instance = HomeCreditRiskAssessment() 
+            self.model_instance.load_model('home_credit_demo_model.pkl')
             
-            # Extract necessary components from the loaded model instance
-            self.selected_features = self.model_instance.selected_features
-            self.label_encoders = self.model_instance.label_encoders
-            self.scaler = self.model_instance.scaler
+            self.selected_features = getattr(self.model_instance, 'selected_features', [])
+            self.label_encoders = getattr(self.model_instance, 'label_encoders', {})
+            self.scaler = getattr(self.model_instance, 'scaler', None)
             self.explainer = getattr(self.model_instance, 'explainer', None)
-            self.fairness_metrics = getattr(self.model_instance, 'fairness_metrics', {}) # Assumes fairness_metrics were saved or part of the class
-
-            if 'lgb' in self.model_instance.models:
-                importances = self.model_instance.models['lgb'].feature_importances_
-                self.feature_importances_lgb = pd.DataFrame({
-                    'feature': self.selected_features, # Make sure these align
-                    'importance': importances
-                }).sort_values(by='importance', ascending=False)
+            self.fairness_metrics = getattr(self.model_instance, 'fairness_metrics', {})
+            
+            # Lấy feature importances từ thuộc tính đã lưu trong model_instance
+            # thay vì tính toán lại từ self.model_instance.models['lgb']
+            # Điều này giả định self.model_instance.feature_importances là một dict {'feature_name': importance_value}
+            loaded_feature_importances = getattr(self.model_instance, 'feature_importances', None)
+            if loaded_feature_importances and isinstance(loaded_feature_importances, dict):
+                self.feature_importances_lgb = pd.DataFrame(
+                    list(loaded_feature_importances.items()),
+                    columns=['feature', 'importance']
+                ).sort_values(by='importance', ascending=False)
+            elif 'lgb' in self.model_instance.models and hasattr(self.model_instance.models['lgb'], 'feature_importances_') and self.selected_features:
+                 # Fallback nếu feature_importances không được lưu đúng cách trong model_package
+                 if len(self.selected_features) == len(self.model_instance.models['lgb'].feature_importances_):
+                    self.feature_importances_lgb = pd.DataFrame({
+                        'feature': self.selected_features,
+                        'importance': self.model_instance.models['lgb'].feature_importances_
+                    }).sort_values(by='importance', ascending=False)
+                 else:
+                    st.warning("Feature importance length mismatch during fallback. Displaying empty.")
+                    self.feature_importances_lgb = pd.DataFrame({'feature':[], 'importance':[]})
+            else:
+                self.feature_importances_lgb = pd.DataFrame({'feature':[], 'importance':[]})
 
             self.model_loaded = True
-            # Use a less obtrusive success message, or remove if sidebar status is enough
             # st.sidebar.success("✅ Model loaded successfully") 
         except FileNotFoundError:
             st.sidebar.error("❌ Model file 'home_credit_demo_model.pkl' not found.")
@@ -76,6 +91,8 @@ class RiskAssessmentDashboard:
             self.model_loaded = False
         except Exception as e:
             st.sidebar.error(f"❌ Error loading model: {e}")
+            import traceback
+            st.sidebar.error(traceback.format_exc()) # In traceback để debug dễ hơn
             self.model_loaded = False
 
     # --- START OF SECTION TO BE REPLACED ---
@@ -750,30 +767,22 @@ class RiskAssessmentDashboard:
             st.warning("Model not loaded. Performance metrics are not available.")
             return
 
-        # These would ideally be loaded from the model package or re-calculated
-        # For now, using placeholders or values from your last run
         st.subheader("Overall Performance (on Validation Set during training)")
 
-        auc_lgb = "N/A"
-        auc_xgb = "N/A"
-        auc_ensemble = "N/A"
-
-        if hasattr(self.model_instance, 'models') and isinstance(self.model_instance.models, dict):
-            auc_lgb = self.model_instance.models.get('lgb_auc', "N/A") 
-            auc_xgb = self.model_instance.models.get('xgb_auc', "N/A")
-            auc_ensemble = self.model_instance.models.get('ensemble_auc', "N/A")
+        # Lấy giá trị AUC trực tiếp từ các thuộc tính của model_instance
+        # Sử dụng getattr với giá trị mặc định "N/A" nếu thuộc tính không tồn tại
+        auc_lgb = getattr(self.model_instance, 'lgb_auc', "N/A")
+        auc_xgb = getattr(self.model_instance, 'xgb_auc', "N/A")
+        auc_ensemble = getattr(self.model_instance, 'ensemble_auc', "N/A")
 
         col1, col2, col3 = st.columns(3)
-        col1.metric("LGBM AUC", f"{auc_lgb:.4f}" if isinstance(auc_lgb, float) else auc_lgb)
-        col2.metric("XGBoost AUC", f"{auc_xgb:.4f}" if isinstance(auc_xgb, float) else auc_xgb)
-        col3.metric("Ensemble AUC", f"{auc_ensemble:.4f}" if isinstance(auc_ensemble, float) else auc_ensemble)
-
+        # Kiểm tra nếu giá trị là float trước khi format
+        col1.metric("LGBM AUC", f"{auc_lgb:.4f}" if isinstance(auc_lgb, (float, np.floating)) else auc_lgb)
+        col2.metric("XGBoost AUC", f"{auc_xgb:.4f}" if isinstance(auc_xgb, (float, np.floating)) else auc_xgb)
+        col3.metric("Ensemble AUC", f"{auc_ensemble:.4f}" if isinstance(auc_ensemble, (float, np.floating)) else auc_ensemble)
 
         st.markdown("---")
         st.subheader("Classification Report (Example)")
-        # This would be from y_val and predictions on validation set
-        # For demo, showing a static image or a pre-formatted text
-        # You could generate this if you have y_val and predictions
         report_data = {
             'precision': [0.75, 0.25],
             'recall': [0.90, 0.15],
@@ -784,7 +793,6 @@ class RiskAssessmentDashboard:
         st.table(report_df)
 
         st.subheader("Confusion Matrix (Example)")
-        # Dummy confusion matrix
         cm_fig = px.imshow([[1620, 180], [170, 30]],
                            labels=dict(x="Predicted Label", y="True Label", color="Count"),
                            x=['No Default', 'Default'],

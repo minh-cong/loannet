@@ -32,18 +32,37 @@ logger = logging.getLogger(__name__)
 
 
 class HomeCreditRiskAssessment:
-    """
-    Home Credit Risk Assessment với Traditional ML + Fairness-First approach
-    """
-    
     def __init__(self):
         self.models = {}
-        self.feature_importance = {}
+        self.feature_importance = {} # Bạn có thể xem xét việc loại bỏ nếu self.feature_importances được dùng thay thế
         self.fairness_metrics = {}
         self.explainer = None
         self.label_encoders = {}
         self.scaler = StandardScaler()
         self.feature_selector = None
+        self.selected_features = [] # Khởi tạo selected_features
+        self.feature_importances = None # Để lưu feature importances từ LGBM
+        
+        # THÊM CÁC THUỘC TÍNH AUC
+        self.lgb_auc = None
+        self.xgb_auc = None
+        self.ensemble_auc = None
+
+        # Khởi tạo các thuộc tính khác để tránh lỗi nếu các bước không được chạy tuần tự
+        self.app_train = pd.DataFrame()
+        self.app_test = pd.DataFrame()
+        self.bureau = pd.DataFrame()
+        self.bureau_balance = pd.DataFrame()
+        self.prev_app = pd.DataFrame()
+        self.pos_cash = pd.DataFrame()
+        self.installments = pd.DataFrame()
+        self.credit_card = pd.DataFrame()
+        self.df_engineered = pd.DataFrame()
+        self.X = pd.DataFrame()
+        self.y = pd.Series(dtype='float64')
+        self.feature_names = []
+        self.protected_attrs = {}
+        self.shap_values = None # Nếu bạn lưu shap_values tổng thể
         
     def load_data(self):
         """Load và basic preprocessing của Home Credit dataset"""
@@ -375,15 +394,34 @@ class HomeCreditRiskAssessment:
     
     def save_model(self, filepath='home_credit_model.pkl'):
         """Lưu model và components"""
+        # Đảm bảo feature_importances được lấy từ model lgb nếu có và selected_features đã được thiết lập
+        if 'lgb' in self.models and hasattr(self.models['lgb'], 'feature_importances_') and self.selected_features:
+            # Kiểm tra độ dài để đảm bảo khớp
+            if len(self.selected_features) == len(self.models['lgb'].feature_importances_):
+                self.feature_importances = dict(zip(
+                    self.selected_features,
+                    self.models['lgb'].feature_importances_
+                ))
+            else:
+                logger.warning(f"Length mismatch: selected_features ({len(self.selected_features)}) vs lgb.feature_importances_ ({len(self.models['lgb'].feature_importances_)}). Not saving feature_importances.")
+                self.feature_importances = {} # Hoặc None
+        else:
+            logger.warning("LGBM model, feature_importances_, or selected_features not available. Not saving feature_importances.")
+            self.feature_importances = {} # Hoặc None
+
         model_package = {
             'models': self.models,
             'scaler': self.scaler,
             'label_encoders': self.label_encoders,
             'feature_selector': self.feature_selector,
             'selected_features': self.selected_features,
-            'explainer': self.explainer,
-            'fairness_metrics': self.fairness_metrics, # Note: SHAP explainers might not always be easily serializable with joblib, especially complex ones or those with large data references.
-            'feature_importances': getattr(self, 'feature_importances', None)                           # It might be better to re-initialize the explainer on load if issues arise.
+            'explainer': self.explainer, 
+            'fairness_metrics': self.fairness_metrics,
+            'feature_importances': self.feature_importances,
+            # LƯU CÁC THUỘC TÍNH AUC
+            'lgb_auc': self.lgb_auc,
+            'xgb_auc': self.xgb_auc,
+            'ensemble_auc': self.ensemble_auc,
         }
         
         joblib.dump(model_package, filepath)
@@ -391,18 +429,28 @@ class HomeCreditRiskAssessment:
     
     def load_model(self, filepath='home_credit_model.pkl'):
         """Load model và components"""
+        logger.info(f"Attempting to load model from {filepath}")
         model_package = joblib.load(filepath)
         
-        self.models = model_package['models']
-        self.scaler = model_package['scaler']
-        self.label_encoders = model_package['label_encoders']
-        self.feature_selector = model_package['feature_selector']
-        self.selected_features = model_package['selected_features']
-        self.explainer = model_package['explainer']
-        self.explainer = model_package.get('explainer')
-        self.fairness_metrics = model_package.get('fairness_metrics', {}) # See note in save_model about explainer serialization.
+        self.models = model_package.get('models', {})
+        self.scaler = model_package.get('scaler', StandardScaler()) # Cung cấp giá trị mặc định
+        self.label_encoders = model_package.get('label_encoders', {})
+        self.feature_selector = model_package.get('feature_selector')
+        self.selected_features = model_package.get('selected_features', [])
+        self.explainer = model_package.get('explainer') 
+        self.fairness_metrics = model_package.get('fairness_metrics', {})
+        self.feature_importances = model_package.get('feature_importances')
+
+        # TẢI CÁC GIÁ TRỊ AUC ĐÃ LƯU
+        self.lgb_auc = model_package.get('lgb_auc')
+        self.xgb_auc = model_package.get('xgb_auc')
+        self.ensemble_auc = model_package.get('ensemble_auc')
         
-        logger.info(f"Model loaded from {filepath}")
+        logger.info(f"Model loaded successfully from {filepath}")
+        # Log các giá trị AUC đã tải để kiểm tra
+        logger.info(f"Loaded LGBM AUC: {self.lgb_auc}")
+        logger.info(f"Loaded XGBoost AUC: {self.xgb_auc}")
+        logger.info(f"Loaded Ensemble AUC: {self.ensemble_auc}")
 
 # Demo Usage
 def run_demo():
@@ -416,68 +464,76 @@ def run_demo():
     model.load_data()
     
     # Feature engineering
-    df_features = model.feature_engineering()
+    df_features = model.feature_engineering() # df_features không được dùng sau đó, model.df_engineered được dùng
     
     # Prepare for modeling
-    X, y = model.prepare_features()
+    X, y = model.prepare_features() # X và y là pd.DataFrame/Series với index gốc
     
     # Feature selection
-    # Ensure X (from prepare_features) is used here if it's the full feature set before selection
-    X_selected_full, selected_features_names = model.feature_selection(k=50) # X_selected_full is based on model.X
+    # model.feature_selection() sẽ cập nhật self.selected_features
+    # và trả về X_selected_full là numpy array không có tên cột
+    X_selected_full_array, selected_features_names = model.feature_selection(k=50) 
     
+    # Tạo DataFrame từ X_selected_full_array với tên cột đúng để train_test_split giữ lại tên cột
+    # Điều này quan trọng cho việc lấy X_val với tên cột cho SHAP sau này
+    X_selected_df = pd.DataFrame(X_selected_full_array, columns=selected_features_names, index=X.index)
+
     # Train-validation split
     from sklearn.model_selection import train_test_split
-    # We need to split the X_selected_full (which is a numpy array)
-    # Also, ensure protected_attrs are sliced correctly later.
-    # It's better to select features from X_train and transform X_val later to avoid data leakage
-    # Or, if feature selection is done on the whole dataset X before split, then X_selected_full is correct.
-    # The current flow does selection on model.X (all data), then splits. This is acceptable for some feature selection methods like SelectKBest.
+    X_train_df, X_val_df, y_train, y_val = train_test_split(
+        X_selected_df, y, test_size=0.2, stratify=y, random_state=42
+    ) # Bây giờ X_train_df và X_val_df là DataFrames
     
-    X_train, X_val, y_train, y_val = train_test_split(
-        X_selected_full, y, test_size=0.2, stratify=y, random_state=42
-    )
+    # Train models - các mô hình sẽ nhận DataFrame
+    model.train_models(X_train_df, y_train, X_val_df, y_val)
     
-    # Train models
-    # X_train and X_val are already the selected features
-    model.train_models(X_train, y_train, X_val, y_val) # X_train and X_val here are numpy arrays of selected features
-    
-    # Predictions
-    ensemble_pred, individual_preds = model.predict_ensemble(X_val) # X_val is already selected features
-    
-    # Evaluate
-    auc_score = roc_auc_score(y_val, ensemble_pred)
-    print(f"Validation AUC: {auc_score:.4f}")
+    # Predictions trên tập validation để tính AUC
+    # predict_ensemble mong đợi một DataFrame với các cột đã chọn
+    ensemble_pred_val, individual_preds_val = model.predict_ensemble(X_val_df)
+
+    # Tính toán và gán các giá trị AUC vào instance của model
+    model.lgb_auc = roc_auc_score(y_val, individual_preds_val['lgb'])
+    model.xgb_auc = roc_auc_score(y_val, individual_preds_val['xgb'])
+    # Logistic Regression AUC (nếu bạn muốn hiển thị riêng)
+    # model.lr_auc = roc_auc_score(y_val, individual_preds_val['lr']) 
+    model.ensemble_auc = roc_auc_score(y_val, ensemble_pred_val)
+
+    logger.info(f"Validation LGBM AUC: {model.lgb_auc:.4f}")
+    logger.info(f"Validation XGBoost AUC: {model.xgb_auc:.4f}")
+    logger.info(f"Validation Ensemble AUC: {model.ensemble_auc:.4f}")
     
     # Fairness evaluation
-    # protected_attrs were created from the original df_engineered, so we need to align their indices with y_val.
-    # y_val.index can be used if y was a Series from the original df and kept its index through splits.
-    # If X_selected_full was created from model.X (which is df[feature_cols]), and y is df['TARGET'],
-    # then y.index can be used to slice protected_attrs if the split was done on y and X_selected_full directly.
-    
-    # Assuming y is a pandas Series and train_test_split preserves indices for y_val
-    # And model.protected_attrs values are pandas Series with original full dataset indices.
-    # We need the indices that correspond to X_val / y_val
-    
-    # Find original indices for y_val to correctly slice protected_attrs
-    # This assumes y maintained its original index from df_engineered
     val_indices = y_val.index 
     protected_attrs_val = {}
-    for k, v_series in model.protected_attrs.items(): # v_series is the full series
-        protected_attrs_val[k] = v_series.loc[val_indices] # Use .loc for index-based slicing
-
-    fairness_metrics = model.evaluate_fairness(y_val, ensemble_pred, protected_attrs_val)
+    for k, v_series in model.protected_attrs.items():
+        if not v_series.empty: # Kiểm tra xem series có dữ liệu không
+             protected_attrs_val[k] = v_series.loc[val_indices]
+        else:
+            logger.warning(f"Protected attribute series '{k}' is empty. Skipping for fairness evaluation on validation set.")
+            protected_attrs_val[k] = pd.Series(dtype='object', index=val_indices) # Tạo series rỗng để tránh lỗi
     
+    # Chỉ đánh giá fairness nếu protected_attrs_val không rỗng hoàn toàn
+    if any(not s.empty for s in protected_attrs_val.values()):
+        fairness_metrics = model.evaluate_fairness(y_val, ensemble_pred_val, protected_attrs_val)
+    else:
+        logger.warning("No valid protected attributes for validation set. Skipping fairness evaluation.")
+
+
     # Setup explainability
-    # X_val is already the selected features array. model.selected_features should be set by feature_selection.
-    model.setup_explainability(X_val[:100]) # X_val is a numpy array
+    # setup_explainability mong muốn một DataFrame (hoặc numpy array nếu explainer hỗ trợ)
+    # X_val_df là DataFrame các features đã chọn
+    model.setup_explainability(X_val_df.sample(min(100, len(X_val_df)), random_state=42)) # Lấy sample nhỏ hơn nếu X_val_df < 100
     
     # Example explanation
-    # X_val.iloc[0].values won't work as X_val is a numpy array. Use X_val[0]
-    explanation = model.explain_prediction(X_val[0])
-    if explanation:
-        print(f"Example explanation ready for customer 0")
-    
-    # Save model
+    # model.explain_prediction mong đợi một hàng dữ liệu (1D numpy array hoặc pd.Series)
+    if not X_val_df.empty:
+        explanation = model.explain_prediction(X_val_df.iloc[0].values) # Truyền dưới dạng numpy array
+        if explanation:
+            print(f"Example explanation ready for customer 0")
+    else:
+        print("X_val_df is empty, cannot generate example explanation.")
+
+    # Save model (Bây giờ model.save_model() sẽ lưu cả các giá trị AUC)
     model.save_model('home_credit_demo_model.pkl')
     
     print("Demo completed successfully!")
