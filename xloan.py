@@ -345,35 +345,42 @@ class HomeCreditRiskAssessment:
         
         logger.info("SHAP explainer ready")
     
-    def explain_prediction(self, customer_data, customer_id=0): # customer_id not used
+    def explain_prediction(self, customer_data, customer_id=0):  # customer_id not used
         """Giải thích prediction cho một customer cụ thể"""
         if self.explainer is None:
             logger.error("SHAP explainer not initialized")
             return None
         
+        # Prepare input for SHAP: ensure it's a 2D NumPy array
+        if isinstance(customer_data, (pd.Series, pd.DataFrame)):
+            input_data = customer_data.values.reshape(1, -1)
+        elif isinstance(customer_data, np.ndarray):
+            # Ensure it's 2D; if 1D, reshape to (1, n_features)
+            input_data = customer_data.reshape(1, -1) if customer_data.ndim == 1 else customer_data
+        else:
+            logger.error("Unsupported customer_data type: must be pandas Series/DataFrame or NumPy array")
+            return None
+        
         # Get SHAP values for this customer
-        # shap_values for TreeExplainer typically returns a list of arrays [shap_for_class0, shap_for_class1] for binary classification
-        # or a single array if only one output is explained.
-        # If self.shap_values from setup_explainability was already computed for a sample,
-        # this recomputes for a single instance.
-        shap_vals_for_customer = self.explainer.shap_values(customer_data.reshape(1, -1))
+        shap_vals_for_customer = self.explainer.shap_values(input_data)
         
-        # For binary classification, shap_values usually returns two arrays (one for each class)
-        # We are interested in the SHAP values for the positive class (class 1)
-        # If shap_vals_for_customer is a list of two arrays, shap_vals_for_customer[1][0] would be for class 1 for the single sample.
-        # If it's already the SHAP values for the positive class, then shap_vals_for_customer[0] is correct.
-        # Assuming shap.TreeExplainer.shap_values for binary classification returns [shap_class_0, shap_class_1]
-        # and we want to explain the prediction for class 1.
-        
+        # For binary classification, shap_values typically returns [shap_for_class0, shap_for_class1]
+        # Select SHAP values for class 1 (positive class) or single output for regression
         explanation = {
-            'expected_value': self.explainer.expected_value[1] if isinstance(self.explainer.expected_value, (list, np.ndarray)) and len(self.explainer.expected_value) > 1 else self.explainer.expected_value, # Expected value for class 1
-            'shap_values': shap_vals_for_customer[1][0] if isinstance(shap_vals_for_customer, list) and len(shap_vals_for_customer) > 1 else shap_vals_for_customer[0], # SHAP values for class 1 for this customer
+            'expected_value': (self.explainer.expected_value[1] 
+                            if isinstance(self.explainer.expected_value, (list, np.ndarray)) 
+                            and len(self.explainer.expected_value) > 1 
+                            else self.explainer.expected_value),
+            'shap_values': (shap_vals_for_customer[1][0] 
+                            if isinstance(shap_vals_for_customer, list) 
+                            and len(shap_vals_for_customer) > 1 
+                            else shap_vals_for_customer[0]),
             'feature_names': self.selected_features,
-            'customer_data': customer_data
-        }
-        
-        return explanation
+        'customer_data': customer_data  # Keep original format for compatibility
+    }
     
+        return explanation
+        
     def create_dashboard_data(self, X_test, predictions):
         """Tạo data cho dashboard"""
         dashboard_data = {
