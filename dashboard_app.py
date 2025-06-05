@@ -43,7 +43,8 @@ class RiskAssessmentDashboard:
         self.explainer = None
         self.fairness_metrics = {}
         self.feature_importances_lgb = pd.DataFrame({'feature':[], 'importance':[]})
-
+        self.classification_report_val = None
+        self.confusion_matrix_val = None
         self.load_model_components()
 
     def load_model_components(self):
@@ -58,7 +59,8 @@ class RiskAssessmentDashboard:
             self.scaler = getattr(self.model_instance, 'scaler', None)
             self.explainer = getattr(self.model_instance, 'explainer', None)
             self.fairness_metrics = getattr(self.model_instance, 'fairness_metrics', {})
-            
+            self.classification_report_val = getattr(self.model_instance, 'classification_report_val', None)
+            self.confusion_matrix_val = getattr(self.model_instance, 'confusion_matrix_val', None)
             # Lấy feature importances từ thuộc tính đã lưu trong model_instance
             # thay vì tính toán lại từ self.model_instance.models['lgb']
             # Điều này giả định self.model_instance.feature_importances là một dict {'feature_name': importance_value}
@@ -781,26 +783,26 @@ class RiskAssessmentDashboard:
         col2.metric("XGBoost AUC", f"{auc_xgb:.4f}" if isinstance(auc_xgb, (float, np.floating)) else auc_xgb)
         col3.metric("Ensemble AUC", f"{auc_ensemble:.4f}" if isinstance(auc_ensemble, (float, np.floating)) else auc_ensemble)
 
-        st.markdown("---")
-        st.subheader("Classification Report (Example)")
-        report_data = {
-            'precision': [0.75, 0.25],
-            'recall': [0.90, 0.15],
-            'f1-score': [0.82, 0.19],
-            'support': [1800, 200]
-        }
-        report_df = pd.DataFrame(report_data, index=['Class 0 (No Default)', 'Class 1 (Default)'])
-        st.table(report_df)
+        if self.classification_report_val:
+        # Convert dict to DataFrame for better display
+        # We might want to reformat this a bit for st.table if nested dicts are too complex
+            report_df = pd.DataFrame(self.classification_report_val).transpose()
+            st.dataframe(report_df) # st.dataframe is often better for dicts/DataFrames
+        else:
+            st.info("Classification report not available.")
 
-        st.subheader("Confusion Matrix (Example)")
-        cm_fig = px.imshow([[1620, 180], [170, 30]],
-                           labels=dict(x="Predicted Label", y="True Label", color="Count"),
-                           x=['No Default', 'Default'],
-                           y=['No Default', 'Default'],
-                           text_auto=True, color_continuous_scale='Blues',
-                           height=400)
-        cm_fig.update_layout(title_text='Confusion Matrix (Validation Set Example)')
-        st.plotly_chart(cm_fig, use_container_width=True)
+        st.subheader("Confusion Matrix (Validation Set)")
+        if self.confusion_matrix_val is not None: # Check for None, as it's a numpy array
+            cm_fig = px.imshow(self.confusion_matrix_val,
+                            labels=dict(x="Predicted Label", y="True Label", color="Count"),
+                            x=['No Default (0)', 'Default (1)'], # Ensure labels match your class order
+                            y=['No Default (0)', 'Default (1)'],
+                            text_auto=True, color_continuous_scale='Blues',
+                            height=400)
+            cm_fig.update_layout(title_text='Confusion Matrix (Validation Set)')
+            st.plotly_chart(cm_fig, use_container_width=True)
+        else:
+            st.info("Confusion matrix not available.")
 
 # Ensure matplotlib is imported for SHAP plots if not already
 import matplotlib.pyplot as plt

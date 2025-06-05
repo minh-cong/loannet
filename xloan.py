@@ -63,6 +63,8 @@ class HomeCreditRiskAssessment:
         self.feature_names = []
         self.protected_attrs = {}
         self.shap_values = None # Nếu bạn lưu shap_values tổng thể
+        self.classification_report_val = None
+        self.confusion_matrix_val = None
         
     def load_data(self):
         """Load và basic preprocessing của Home Credit dataset"""
@@ -429,6 +431,8 @@ class HomeCreditRiskAssessment:
             'lgb_auc': self.lgb_auc,
             'xgb_auc': self.xgb_auc,
             'ensemble_auc': self.ensemble_auc,
+            'classification_report_val': self.classification_report_val,
+            'confusion_matrix_val': self.confusion_matrix_val,
         }
         
         joblib.dump(model_package, filepath)
@@ -452,7 +456,11 @@ class HomeCreditRiskAssessment:
         self.lgb_auc = model_package.get('lgb_auc')
         self.xgb_auc = model_package.get('xgb_auc')
         self.ensemble_auc = model_package.get('ensemble_auc')
-        
+        self.classification_report_val = model_package.get('classification_report_val')
+        self.confusion_matrix_val = model_package.get('confusion_matrix_val')
+    # ...
+        logger.info(f"Loaded Classification Report: {'Available' if self.classification_report_val else 'Not Available'}")
+        logger.info(f"Loaded Confusion Matrix: {'Available' if self.confusion_matrix_val is not None else 'Not Available'}")
         logger.info(f"Model loaded successfully from {filepath}")
         # Log các giá trị AUC đã tải để kiểm tra
         logger.info(f"Loaded LGBM AUC: {self.lgb_auc}")
@@ -463,7 +471,6 @@ class HomeCreditRiskAssessment:
 def run_demo():
     """Chạy demo hoàn chỉnh"""
     print("=== HOME CREDIT RISK ASSESSMENT DEMO ===")
-    
     # Initialize
     model = HomeCreditRiskAssessment()
     
@@ -497,14 +504,21 @@ def run_demo():
     # Predictions trên tập validation để tính AUC
     # predict_ensemble mong đợi một DataFrame với các cột đã chọn
     ensemble_pred_val, individual_preds_val = model.predict_ensemble(X_val_df)
-
+    y_pred_val_labels = (ensemble_pred_val > 0.5).astype(int)
     # Tính toán và gán các giá trị AUC vào instance của model
+    report_dict = classification_report(y_val, y_pred_val_labels, output_dict=True, zero_division=0)
+    cm_array = confusion_matrix(y_val, y_pred_val_labels)
+
     model.lgb_auc = roc_auc_score(y_val, individual_preds_val['lgb'])
     model.xgb_auc = roc_auc_score(y_val, individual_preds_val['xgb'])
     # Logistic Regression AUC (nếu bạn muốn hiển thị riêng)
     # model.lr_auc = roc_auc_score(y_val, individual_preds_val['lr']) 
     model.ensemble_auc = roc_auc_score(y_val, ensemble_pred_val)
+    model.classification_report_val = report_dict
+    model.confusion_matrix_val = cm_array
 
+    logger.info("Classification Report (Validation):\n" + classification_report(y_val, y_pred_val_labels, zero_division=0))
+    logger.info(f"Confusion Matrix (Validation):\n{cm_array}")
     logger.info(f"Validation LGBM AUC: {model.lgb_auc:.4f}")
     logger.info(f"Validation XGBoost AUC: {model.xgb_auc:.4f}")
     logger.info(f"Validation Ensemble AUC: {model.ensemble_auc:.4f}")
