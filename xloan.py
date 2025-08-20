@@ -161,8 +161,17 @@ class HomeCreditRiskAssessment:
         df['EXT_SOURCE_PROD'] = df['EXT_SOURCE_1'] * df['EXT_SOURCE_2'] * df['EXT_SOURCE_3']
         
         # 5. Binary indicators
-        df['HAS_CAR'] = (df.get('FLAG_OWN_CAR', 'N') == 'Y').astype(int)
-        df['HAS_REALTY'] = (df.get('FLAG_OWN_REALTY', 'N') == 'Y').astype(int)
+        # df.get with a scalar default would return a single value when the column
+        # is missing, leading to a boolean rather than a Series and causing
+        # ``AttributeError: 'bool' object has no attribute 'astype'`` when
+        # running ``.astype(int)``. Provide a Series default aligned with the
+        # dataframe index so the expression always yields a Series.
+        df['HAS_CAR'] = (
+            df.get('FLAG_OWN_CAR', pd.Series('N', index=df.index)).eq('Y').astype(int)
+        )
+        df['HAS_REALTY'] = (
+            df.get('FLAG_OWN_REALTY', pd.Series('N', index=df.index)).eq('Y').astype(int)
+        )
         df['HAS_CHILDREN'] = (df['CNT_CHILDREN'] > 0).astype(int)
         
         # 6. Risk categories (business logic)
